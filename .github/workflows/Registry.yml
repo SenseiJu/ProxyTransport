@@ -16,7 +16,7 @@ jobs:
           REPO_USERNAME: github-deploy
           REPO_PASSWORD: ${{ secrets.DEPLOY_TOKEN }}
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ProxyTransport
           path: target/ProxyTransport.jar

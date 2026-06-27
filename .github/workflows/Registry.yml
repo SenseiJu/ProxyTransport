@@ -5,13 +5,15 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Setup Maven Action
-        uses: s4u/setup-maven-action@v1.5.0
+      - name: Startup
+        uses: actions/checkout@v4
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
           java-version: '17'
-          java-distribution: 'adopt'
-      - name: Publish and package client
-        run: mvn -T 4 --batch-mode deploy package -q -s settings.xml
+          distribution: 'temurin'
+      - name: Publish and package
+        run: ./gradlew build publish
         env:
           REPO_USERNAME: github-deploy
           REPO_PASSWORD: ${{ secrets.DEPLOY_TOKEN }}
@@ -19,4 +21,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ProxyTransport
-          path: target/ProxyTransport.jar
+          path: build/libs/ProxyTransport.jar

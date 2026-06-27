@@ -74,14 +74,19 @@ public class QuicTransportServerInfo extends ServerInfo {
     private Future<QuicChannel> createServerConnection(EventLoopGroup eventLoopGroup, MainLogger logger, InetSocketAddress address) {
         EventLoop eventLoop = eventLoopGroup.next();
 
-        if (this.serverConnections.containsKey(address)) {
-            logger.info("Reusing connection to " + address + " for " + this.getServerName() + " server");
-            return this.serverConnections.get(address);
+        // QUIC needs a resolved address; unlike TCP it won't resolve a hostname and NPEs on a null InetAddress.
+        final InetSocketAddress target = address.isUnresolved()
+                ? new InetSocketAddress(address.getHostString(), address.getPort())
+                : address;
+
+        if (this.serverConnections.containsKey(target)) {
+            logger.info("Reusing connection to " + target + " for " + this.getServerName() + " server");
+            return this.serverConnections.get(target);
         }
 
-        logger.info("Creating connection to " + address + " for " + this.getServerName() + " server");
+        logger.info("Creating connection to " + target + " for " + this.getServerName() + " server");
         Promise<QuicChannel> promise = eventLoop.newPromise();
-        this.serverConnections.put(address, promise);
+        this.serverConnections.put(target, promise);
 
         QuicSslContext sslContext = QuicSslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE).applicationProtocols("ng").build();
         ChannelHandler codec = new QuicClientCodecBuilder()
@@ -107,31 +112,31 @@ public class QuicTransportServerInfo extends ServerInfo {
                                         ctx.close();
                                     }
                                 })
-                                .remoteAddress(address)
+                                .remoteAddress(target)
                                 .connect().addListener((Future<QuicChannel> quicChannelFuture) -> {
                                     if (quicChannelFuture.isSuccess()) {
-                                        logger.debug("Connection to " + address + " for " + this.getServerName() + " server established");
+                                        logger.debug("Connection to " + target + " for " + this.getServerName() + " server established");
 
                                         QuicChannel quicChannel = quicChannelFuture.getNow();
                                         quicChannel.closeFuture().addListener(f -> {
-                                            logger.debug("Connection to " + address + " for " + this.getServerName() + " server closed");
+                                            logger.debug("Connection to " + target + " for " + this.getServerName() + " server closed");
                                             channelFuture.channel().close();
-                                            this.serverConnections.remove(address);
+                                            this.serverConnections.remove(target);
                                         });
 
                                         promise.trySuccess(quicChannel);
                                     } else {
-                                        logger.warning("Connection to " + address + " for " + this.getServerName() + " server failed");
+                                        logger.warning("Connection to " + target + " for " + this.getServerName() + " server failed");
 
                                         promise.tryFailure(quicChannelFuture.cause());
                                         channelFuture.channel().close();
-                                        this.serverConnections.remove(address);
+                                        this.serverConnections.remove(target);
                                     }
                                 });
                     } else {
                         promise.tryFailure(channelFuture.cause());
                         channelFuture.channel().close();
-                        this.serverConnections.remove(address);
+                        this.serverConnections.remove(target);
                     }
                 });
 

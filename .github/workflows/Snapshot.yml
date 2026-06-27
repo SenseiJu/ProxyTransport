@@ -1,26 +1,27 @@
-name: ProxyTransport Release
+name: Snapshot
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - master
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Startup
-        uses: actions/checkout@v2
+      - name: Checkout
+        uses: actions/checkout@v4
       - name: Set up Java 17
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           java-version: 17
-          distribution: microsoft
+          distribution: temurin
       - name: Build ProxyTransport
         run: ./gradlew build
-      - name: Create Release
+      - name: Prerelease
         uses: "marvinpinto/action-automatic-releases@latest"
         with:
           repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          prerelease: false
-          title: "ProxyTransport ${{ github.ref_name }}"
+          automatic_release_tag: "latest"
+          prerelease: true
+          title: "Development Build"
           files: |
             build/libs/ProxyTransport.jar

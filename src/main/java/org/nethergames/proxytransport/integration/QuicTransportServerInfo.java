@@ -79,9 +79,15 @@ public class QuicTransportServerInfo extends ServerInfo {
                 ? new InetSocketAddress(address.getHostString(), address.getPort())
                 : address;
 
-        if (this.serverConnections.containsKey(target)) {
-            logger.info("Reusing connection to " + target + " for " + this.getServerName() + " server");
-            return this.serverConnections.get(target);
+        Future<QuicChannel> existing = this.serverConnections.get(target);
+        if (existing != null) {
+            if (isUsable(existing)) {
+                logger.info("Reusing connection to " + target + " for " + this.getServerName() + " server");
+                return existing;
+            }
+
+            logger.debug("Discarding stale connection to " + target + " for " + this.getServerName() + " server");
+            this.serverConnections.remove(target, existing);
         }
 
         logger.info("Creating connection to " + target + " for " + this.getServerName() + " server");
@@ -121,7 +127,7 @@ public class QuicTransportServerInfo extends ServerInfo {
                                         quicChannel.closeFuture().addListener(f -> {
                                             logger.debug("Connection to " + target + " for " + this.getServerName() + " server closed");
                                             channelFuture.channel().close();
-                                            this.serverConnections.remove(target);
+                                            this.serverConnections.remove(target, promise);
                                         });
 
                                         promise.trySuccess(quicChannel);
@@ -130,17 +136,28 @@ public class QuicTransportServerInfo extends ServerInfo {
 
                                         promise.tryFailure(quicChannelFuture.cause());
                                         channelFuture.channel().close();
-                                        this.serverConnections.remove(target);
+                                        this.serverConnections.remove(target, promise);
                                     }
                                 });
                     } else {
                         promise.tryFailure(channelFuture.cause());
                         channelFuture.channel().close();
-                        this.serverConnections.remove(target);
+                        this.serverConnections.remove(target, promise);
                     }
                 });
 
         return promise;
+    }
+
+    private boolean isUsable(Future<QuicChannel> future) {
+        if (!future.isDone()) {
+            return true;
+        }
+        if (!future.isSuccess()) {
+            return false;
+        }
+        QuicChannel channel = future.getNow();
+        return channel != null && channel.isActive();
     }
 
     public Class<? extends DatagramChannel> getProperSocketChannel() {

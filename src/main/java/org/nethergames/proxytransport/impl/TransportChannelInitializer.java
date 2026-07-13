@@ -46,6 +46,8 @@ public class TransportChannelInitializer extends ChannelInitializer<Channel> {
 
         channel.attr(PacketDirection.ATTRIBUTE).set(PacketDirection.SERVER_BOUND);
 
+        channel.config().setOption(ChannelOption.ALLOW_HALF_CLOSURE, false);
+
         NetworkMetrics metrics = this.player.getProxy().getNetworkMetrics();
         if (metrics != null) {
             channel.attr(NetworkMetrics.ATTRIBUTE).set(metrics);

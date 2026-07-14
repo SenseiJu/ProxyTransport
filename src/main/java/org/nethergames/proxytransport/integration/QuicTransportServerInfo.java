@@ -36,6 +36,10 @@ public class QuicTransportServerInfo extends ServerInfo {
             .serverInfoFactory(QuicTransportServerInfo::new)
             .register();
 
+
+    private static final long MAX_DATA = 64L * 1024L * 1024L;
+    private static final int IDLE_TIMEOUT_MILLIS = 30_000;
+
     private final ConcurrentHashMap<InetSocketAddress, Future<QuicChannel>> serverConnections = new ConcurrentHashMap<>();
 
     public QuicTransportServerInfo(String serverName, InetSocketAddress address, InetSocketAddress publicAddress) {
@@ -97,8 +101,8 @@ public class QuicTransportServerInfo extends ServerInfo {
         QuicSslContext sslContext = QuicSslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE).applicationProtocols("ng").build();
         ChannelHandler codec = new QuicClientCodecBuilder()
                 .sslContext(sslContext)
-                .maxIdleTimeout(2000, TimeUnit.MILLISECONDS)
-                .initialMaxData(10000000)
+                .maxIdleTimeout(IDLE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+                .initialMaxData(MAX_DATA)
                 .initialMaxStreamDataBidirectionalLocal(1000000)
                 .maxRecvUdpPayloadSize(1350)
                 .maxSendUdpPayloadSize(1350)

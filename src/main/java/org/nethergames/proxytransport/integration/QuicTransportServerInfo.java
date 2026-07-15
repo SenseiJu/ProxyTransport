@@ -15,6 +15,8 @@ import io.netty.channel.socket.DatagramChannel;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.incubator.codec.quic.*;
+import io.netty.util.Attribute;
+import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.Promise;
 import net.jodah.expiringmap.internal.NamedThreadFactory;
@@ -24,6 +26,7 @@ import java.net.InetSocketAddress;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class QuicTransportServerInfo extends ServerInfo {
     public static final int availableCPU = Runtime.getRuntime().availableProcessors();
@@ -39,6 +42,15 @@ public class QuicTransportServerInfo extends ServerInfo {
 
     private static final long MAX_DATA = 64L * 1024L * 1024L;
     private static final int IDLE_TIMEOUT_MILLIS = 30_000;
+
+    // Failure-eviction: a shared connection whose streams keep dying during the downstream handshake
+    // (flow-control wedged, downstream restarted, etc.) must stop being reused, or every new player
+    // inherits the wedge until the proxy is rebooted. A stream that lives past SHORT_LIVED_NANOS is
+    // treated as a successful handshake and resets the streak.
+    private static final long SHORT_LIVED_NANOS = 20_000L * 1_000_000L; // 20s
+    private static final int MAX_CONSECUTIVE_FAILURES = 3;
+    private static final AttributeKey<AtomicInteger> CONSECUTIVE_FAILURES =
+            AttributeKey.valueOf("proxytransport-consecutive-failures");
 
     private final ConcurrentHashMap<InetSocketAddress, Future<QuicChannel>> serverConnections = new ConcurrentHashMap<>();
 
@@ -56,15 +68,20 @@ public class QuicTransportServerInfo extends ServerInfo {
         EventLoop eventLoop = proxiedPlayer.getProxy().getWorkerEventLoopGroup().next();
         Promise<ClientConnection> promise = eventLoop.newPromise();
 
-        this.createServerConnection(eventLoop, proxiedPlayer.getLogger(), this.getAddress()).addListener((Future<QuicChannel> future) -> {
+        final InetSocketAddress target = resolve(this.getAddress());
+        final Future<QuicChannel> connectionFuture = this.createServerConnection(eventLoop, proxiedPlayer.getLogger(), this.getAddress());
+        connectionFuture.addListener((Future<QuicChannel> future) -> {
             if (future.isSuccess()) {
                 proxiedPlayer.getLogger().debug("Creating stream for " + this.getServerName() + " server");
                 QuicChannel quicChannel = future.getNow();
 
                 quicChannel.createStream(QuicStreamType.BIDIRECTIONAL, new TransportChannelInitializer(proxiedPlayer, this, promise)).addListener((Future<QuicStreamChannel> streamFuture) -> {
-                    if (!streamFuture.isSuccess()) {
+                    if (streamFuture.isSuccess()) {
+                        this.trackStreamHealth(streamFuture.getNow(), quicChannel, target, connectionFuture, proxiedPlayer.getLogger());
+                    } else {
                         promise.tryFailure(streamFuture.cause());
-                        quicChannel.close();
+                        // Could not even open a stream: stop reusing this connection.
+                        this.evictConnection(target, connectionFuture, proxiedPlayer.getLogger());
                     }
                 });
             } else {
@@ -75,13 +92,58 @@ public class QuicTransportServerInfo extends ServerInfo {
         return promise;
     }
 
+    /**
+     * Watches a freshly-opened stream: if streams keep dying during the downstream handshake
+     * (short-lived), the shared connection is wedged, so evict it from the cache and let the next
+     * player build a fresh one. A stream that lives past {@link #SHORT_LIVED_NANOS} counts as a
+     * healthy handshake and resets the consecutive-failure streak for that connection.
+     */
+    private void trackStreamHealth(QuicStreamChannel stream, QuicChannel quicChannel, InetSocketAddress target,
+                                   Future<QuicChannel> connectionFuture, MainLogger logger) {
+        final long openedAt = System.nanoTime();
+
+        Attribute<AtomicInteger> attribute = quicChannel.attr(CONSECUTIVE_FAILURES);
+        AtomicInteger current = attribute.get();
+        if (current == null) {
+            current = new AtomicInteger();
+            AtomicInteger existing = attribute.setIfAbsent(current);
+            if (existing != null) {
+                current = existing;
+            }
+        }
+        final AtomicInteger failures = current;
+
+        stream.closeFuture().addListener(f -> {
+            if (System.nanoTime() - openedAt < SHORT_LIVED_NANOS) {
+                int count = failures.incrementAndGet();
+                if (count >= MAX_CONSECUTIVE_FAILURES) {
+                    logger.warning("Evicting QUIC connection to " + target + " for " + this.getServerName()
+                            + " server after " + count + " consecutive failed handshakes");
+                    this.evictConnection(target, connectionFuture, logger);
+                }
+            } else {
+                failures.set(0);
+            }
+        });
+    }
+
+    private void evictConnection(InetSocketAddress target, Future<QuicChannel> connectionFuture, MainLogger logger) {
+        if (this.serverConnections.remove(target, connectionFuture)) {
+            logger.debug("Discarded cached connection to " + target + " for " + this.getServerName() + " server");
+        }
+    }
+
+    private static InetSocketAddress resolve(InetSocketAddress address) {
+        // QUIC needs a resolved address; unlike TCP it won't resolve a hostname and NPEs on a null InetAddress.
+        return address.isUnresolved()
+                ? new InetSocketAddress(address.getHostString(), address.getPort())
+                : address;
+    }
+
     private Future<QuicChannel> createServerConnection(EventLoopGroup eventLoopGroup, MainLogger logger, InetSocketAddress address) {
         EventLoop eventLoop = eventLoopGroup.next();
 
-        // QUIC needs a resolved address; unlike TCP it won't resolve a hostname and NPEs on a null InetAddress.
-        final InetSocketAddress target = address.isUnresolved()
-                ? new InetSocketAddress(address.getHostString(), address.getPort())
-                : address;
+        final InetSocketAddress target = resolve(address);
 
         Future<QuicChannel> existing = this.serverConnections.get(target);
         if (existing != null) {
